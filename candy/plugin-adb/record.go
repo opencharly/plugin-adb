@@ -379,6 +379,15 @@ func runSessionCapture(dev sessionDevice, cfg RecorderConfig, done <-chan struct
 		return 0, err
 	}
 	<-done
+	// R1 (the adb-session-stop row gate, runs 2026.250.1940/2017/2027): the
+	// runner's stop is SIGTERM → ProcessShutdownGrace → SIGKILL, and the device
+	// finalize chain (SIGINT → size-stabilize → goadb pull) can exceed it — the
+	// recorder was SIGKILLed mid-pull, losing the row. The evidence row is
+	// finalized FIRST (artifact-less; the absent artifact is the visible
+	// failure), so a stop raced by SIGKILL can never lose it — the stop gate
+	// polls exactly that row — and a completed pull REWRITES the row with the
+	// mp4 artifact.
+	_ = finalizeSession(cfg, "", 0)
 	size, stopErr := stopScreenrecord(dev, cfg)
 	mp4 := cfg.artifactPath()
 	var pullErr error
