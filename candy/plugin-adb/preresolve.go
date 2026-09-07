@@ -191,10 +191,8 @@ func resolveAndroidDevice(spc *spec.ResolvedAndroid, node *spec.Deploy, path, em
 	if node != nil && node.Engine == "docker" {
 		engine = "docker"
 	}
-	var container string
-	if i := strings.LastIndexByte(path, '.'); i >= 0 {
-		parent := path[:i]
-		container = "charly-" + kit.NestedContainerName(parent)
+	container := androidParentContainer(node, path)
+	if container != "" {
 		engine = kit.EngineBinary(engine)
 		if !kit.ContainerRunning(engine, container) {
 			return androidDevice{}, fmt.Errorf("parent pod container %s is not running (start it before deploying the android device)", container)
@@ -252,6 +250,23 @@ func resolveAndroidHostPortRef(addr, path string, node *spec.Deploy) (string, er
 		return "", err
 	}
 	return before + fmt.Sprintf("%d", hp) + after0, nil
+}
+
+// androidParentContainer derives the parent pod container a NESTED android device
+// targets, or "" for a standalone device. The deploy tree stamps Deploy.MemberOf
+// with the folded parent's registered key (loader-derived; the bed's nested
+// device: / device-net: nodes under check-android-emulator-pod carry
+// MemberOf="check-android-emulator-pod"), which survives the leaf-name preresolve
+// path (device — the dotted-path parse is the fallback for un-stamped
+// callers). NestedContainerName maps dots to underscores (spec's venue naming).
+func androidParentContainer(node *spec.Deploy, path string) string {
+	if node != nil && node.MemberOf != "" {
+		return "charly-" + kit.NestedContainerName(node.MemberOf)
+	}
+	if i := strings.LastIndexByte(path, '.'); i >= 0 {
+		return "charly-" + kit.NestedContainerName(path[:i])
+	}
+	return ""
 }
 
 // collectAndroidInstalls walks the deploy's compiled plans (WIRE VIEWS — the
