@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/opencharly/plugin-adb/candy/plugin-adb/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	pb "github.com/opencharly/spec/proto"
@@ -39,16 +40,19 @@ func (p provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.Invoke
 	return p.invokeVerb(ctx, req)
 }
 
-// invokeVerb runs one `adb:` verb operation. It decodes the full #Op + the env, skips
-// in box mode (these probes need a running container with a host-mapped adb port),
-// dispatches the method, and self-evaluates the matchers + artifact validators.
-func (provider) invokeVerb(_ context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, error) {
+// invokeVerb runs one `adb:` verb operation. It decodes the full #Op + the typed
+// plugin input + the env, skips in box mode (these probes need a running container
+// with a host-mapped adb port), dispatches the method, and self-evaluates the
+// matchers + artifact validators.
+func (provider) invokeVerb(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, error) {
 	var op spec.Op
 	if len(req.GetParamsJson()) > 0 {
 		if err := json.Unmarshal(req.GetParamsJson(), &op); err != nil {
 			return sdk.ResultJSON("fail", "adb: decode op: "+err.Error())
 		}
 	}
+	var in params.AdbInput
+	kit.DecodeInput(op.PluginInput, &in)
 	var env adbEnv
 	if len(req.GetEnvJson()) > 0 {
 		_ = json.Unmarshal(req.GetEnvJson(), &env)
@@ -67,6 +71,24 @@ func (provider) invokeVerb(_ context.Context, req *pb.InvokeRequest) (*pb.Invoke
 	// seams always set AdbAddr, so they never hit this.
 	if env.AdbAddr == "" && env.inPodContainer() == "" {
 		return sdk.ResultJSON("skip", fmt.Sprintf("adb: %s has no device context (box=%q)", method, env.Box))
+	}
+
+	// session (Cutover E, E-4): the DETACHED recorder owns the device wire — the
+	// provider never dials for a session. The device-context resolution (container
+	// inspect → host-published 5037) gates on the live deployment mirroring the
+	// record-session contract; start hands the spawn to the runner's generic
+	// background-session service (verb:session) over the InvokeProvider reverse
+	// leg; stop/status talk to that same service. No artifact is produced inside
+	// this Invoke (the recorder writes <session>.mp4 detached), so artifactMethod
+	// stays false.
+	if method == "session" {
+		// The reverse leg needs a CheckContext (dialed once on the Invoke's broker).
+		cc, cerr := sdk.NewCheckContext(req.GetExecutorBrokerId(), req.GetEnvJson())
+		if cerr != nil {
+			return sdk.ResultJSON("fail", fmt.Sprintf("adb: session: %v", cerr))
+		}
+		out, runErr := runSession(ctx, cc, &env, &in, env.Venue)
+		return sdk.VerbVerdict("adb", method, out, runErr, &op, false)
 	}
 
 	out, runErr := dispatch(&env, &op)

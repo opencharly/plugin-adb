@@ -24,10 +24,15 @@ plugin-adb:
             deploy-tree node + kind:android entity PLUGIN-SIDE (K-wave W3a
             A3-phase-2) and resolving Google-creds peer-to-peer via verb:credential,
             and ships the result in DeployVenue.Substrate; this plugin gates
-            on boot then installs. Provides the full 12-method verb
+            on boot then installs. Provides the full 13-method verb
             surface (devices/shell/install/install-app/uninstall/getprop/screencap/
-            logcat-tail/wait-for-device/wait-ui-settled/current-focus/keyevent) plus
-            the deploy substrate. The R10 consumer is the check-android-emulator-pod
+            logcat-tail/wait-for-device/wait-ui-settled/current-focus/keyevent/session)
+            plus the deploy substrate. session = the ON-DEVICE screenrecord bracket
+            (Cutover E, E-4): the plugin's own binary runs in recorder mode through
+            the runner's generic background-session service (verb:session), starts
+            `screenrecord` on the device at phase start, stops it at phase end,
+            and pulls the MP4 via the goadb device-file GetFile path into the
+            evidence row. The R10 consumer is the check-android-emulator-pod
             bed (via android-emulator-layer).
         plugin:
             providers:
@@ -42,5 +47,35 @@ plugin-adb:
               adb: devices
               stdout:
                 - contains: emulator-5554
+              context:
+                - runtime
+            - check: the adb session method starts the ON-DEVICE screenrecord bracket through the runner's generic background-session service (the detached recorder submits to verb:session over the reverse leg)
+              id: adb-session-start
+              adb:
+                method: session
+                action: start
+                session_id: ade-adb-session
+              stdout:
+                - contains: started
+              context:
+                - runtime
+            - check: the adb session status reports the detached recorder alive
+              id: adb-session-status
+              adb:
+                method: session
+                action: status
+                session_id: ade-adb-session
+              stdout:
+                - contains: alive=true
+              context:
+                - runtime
+            - check: the adb session stop finalizes the device bracket and its evidence row (the pulled session.mp4 + row.json)
+              id: adb-session-stop
+              adb:
+                method: session
+                action: stop
+                session_id: ade-adb-session
+              stdout:
+                - contains: stopped
               context:
                 - runtime
