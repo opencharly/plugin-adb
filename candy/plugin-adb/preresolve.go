@@ -38,9 +38,9 @@ const (
 // androidPreresolveParams decodes the host's marshalDeployOpParams envelope (name/dir/node/plans —
 // the SAME ad-hoc shape every OpPreresolve dispatch already carries, unchanged by this move).
 type androidPreresolveParams struct {
-	Name  string                   `json:"name"`
-	Dir   string                   `json:"dir"`
-	Node  *spec.Deploy             `json:"node"`
+	Name string       `json:"name"`
+	Dir  string       `json:"dir"`
+	Node *spec.Deploy `json:"node"`
 	// Plans arrive in the JSON-roundtrippable WIRE form (spec.InstallPlanView —
 	// the same shape build_overlay.go / unified_targets.go serialize for every
 	// substrate); the old *deploykit.InstallPlan decode (Steps []spec.InstallStep
@@ -228,16 +228,23 @@ func resolveAndroidHostPortRef(addr, path string, node *spec.Deploy) (string, er
 	if _, err := fmt.Sscanf(before0, "%d", &ctrPort); err != nil || ctrPort <= 0 {
 		return "", fmt.Errorf("adb host %q: ${HOST_PORT:N} requires a positive container port", addr)
 	}
-	i := strings.LastIndexByte(path, '.')
-	if i < 0 {
-		return "", fmt.Errorf("adb host %q uses ${HOST_PORT:%d} but the device is not nested under a pod (deploy path %q has no parent to read the published port from)", addr, ctrPort, path)
+	// Parent pod derivation is shared with the in-pod device path (R3 — one
+	// canonical derivation, androidParentContainer): the loader stamps
+	// Deploy.MemberOf with the folded parent's registered key, so a nested
+	// endpoint device (device-net under check-android-emulator-pod) resolves
+	// the pod container here; the dotted-path parse is the fallback for
+	// un-stamped callers. The old inline parse only understood dotted paths,
+	// so a MemberOf-stamped member key with no dots ("device-net") wrongly
+	// reported the endpoint as "not nested under a pod" even though it is.
+	container := androidParentContainer(node, path)
+	if container == "" {
+		return "", fmt.Errorf("adb host %q uses ${HOST_PORT:%d} but the device is not nested under a pod (deploy %q has no parent pod container to read the published port from)", addr, ctrPort, path)
 	}
 	engine := "podman"
 	if node != nil && node.Engine == "docker" {
 		engine = "docker"
 	}
 	engine = kit.EngineBinary(engine)
-	container := "charly-" + kit.NestedContainerName(path[:i])
 	if !kit.ContainerRunning(engine, container) {
 		return "", fmt.Errorf("parent pod container %s is not running (start it before deploying the android endpoint device)", container)
 	}

@@ -1,4 +1,3 @@
-
 package adb
 
 import (
@@ -15,7 +14,8 @@ import (
 // (the JSON-roundtrippable wire form — build_overlay.go/unified_targets.go), but the
 // preresolve params decoded them as *deploykit.InstallPlan, whose Steps
 // []spec.InstallStep interface cannot unmarshal from the wire object:
-//   json: cannot unmarshal object into androidPreresolveParams.plans.0.steps.0 of type spec.InstallStep
+//
+//	json: cannot unmarshal object into androidPreresolveParams.plans.0.steps.0 of type spec.InstallStep
 func TestAndroidPreresolveParamsWireRoundTrip(t *testing.T) {
 	repo := t.TempDir()
 	candyDir := filepath.Join(repo, "candy", "layer-android-test-apps")
