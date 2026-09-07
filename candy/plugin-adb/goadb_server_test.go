@@ -180,7 +180,10 @@ func TestRunSessionRecorderAgainstRealGoadbServer(t *testing.T) {
 	defer ln.Close()
 	st := &stubState{
 		// start gate sees the capture file immediately; the stop path sees two
-		// equal nonzero sizes = finalized.
+		// equal nonzero sizes = finalized. shellOut carries the display-ready
+		// marker (dumpsys display) — the E-4 display gate's probe reads it, so
+		// the launch proceeds over the real wire.
+		shellOut:  "mState=ON",
 		statSizes: []int32{0, 120, 120},
 		mp4Bytes:  "\x00\x00\x00\x18ftypmp42" + strings.Repeat("x", 64),
 		shellMu:   make(chan int, 1),

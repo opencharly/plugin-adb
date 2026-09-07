@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -33,16 +32,17 @@ func TestCollectAndroidInstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plans := []*deploykit.InstallPlan{{
-		Steps: []spec.InstallStep{&spec.ApkInstallStep{
-			CandyName: "android-apidemos",
-			CandyDir:  candyDir,
-			Packages: []spec.ApkPackageSpec{
-				{Package: "org.fdroid.fdroid", Source: "apk-pure", Arch: "x86_64"},
-				{Apk: "tests/data/ApiDemos.apk"}, // project-root-relative → absolute
-			},
-		}},
-	}}
+	plan := &spec.InstallPlan{Steps: []spec.InstallStep{&spec.ApkInstallStep{
+		CandyName: "android-apidemos",
+		CandyDir:  candyDir,
+		Packages: []spec.ApkPackageSpec{
+			{Package: "org.fdroid.fdroid", Source: "apk-pure", Arch: "x86_64"},
+			{Apk: "tests/data/ApiDemos.apk"}, // project-root-relative → absolute
+		},
+	}}}
+	// the wire form: what the host actually serializes for a substrate preresolve
+	wv := spec.WireView(plan)
+	plans := []*spec.InstallPlanView{&wv}
 
 	installs, err := collectAndroidInstalls(plans)
 	if err != nil {
@@ -59,9 +59,11 @@ func TestCollectAndroidInstalls(t *testing.T) {
 	}
 
 	// A relative committed-APK that cannot be anchored is a HARD ERROR (no silent pass).
-	bad := []*deploykit.InstallPlan{{Steps: []spec.InstallStep{&spec.ApkInstallStep{
+	badPlan := &spec.InstallPlan{Steps: []spec.InstallStep{&spec.ApkInstallStep{
 		CandyName: "x", CandyDir: "", Packages: []spec.ApkPackageSpec{{Apk: "rel/missing.apk"}},
-	}}}}
+	}}}
+	bv := spec.WireView(badPlan)
+	bad := []*spec.InstallPlanView{&bv}
 	if _, err := collectAndroidInstalls(bad); err == nil {
 		t.Error("unanchored relative committed-APK must error, got nil")
 	}

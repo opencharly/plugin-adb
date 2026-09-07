@@ -27,6 +27,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	adb "github.com/zach-klippenstein/goadb"
@@ -56,11 +57,12 @@ const (
 // guards a forgotten stop (screenrecord's default limit is 180s — too short for
 // a real phase).
 const (
-	screenrecordMaxSeconds   = 1800
-	screenrecordStartBudget  = 5 * time.Second // wait for the capture file to appear after launch
-	screenrecordFinalizeWait = 10 * time.Second
-	screenrecordStabilityGap = 750 * time.Millisecond // two equal Stat samples = finalized
-	screenrecordRemoteDir    = "/sdcard"
+	screenrecordMaxSeconds        = 1800
+	screenrecordStartBudget       = 5 * time.Second        // wait for the capture file to appear after launch
+	screenrecordFinalizeWait      = 10 * time.Second       // wait for the size to stabilize after SIGINT
+	screenrecordStabilityGap      = 750 * time.Millisecond // two equal Stat samples = finalized
+	screenrecordRemoteDir         = "/sdcard"
+	screenrecordDeviceReadyBudget = 90 * time.Second // max wait for the emulator to attach to adb + its display to come up at phase start
 )
 
 // evidenceRow mirrors the shared #EvidenceRow shape (plan §4 A-task-1) — the
@@ -103,8 +105,19 @@ type RecorderConfig struct {
 	Phase     string // evidence-row provenance (build|live|update|teardown)
 
 	// Bounded-wait budgets (test-overridable; zero = the package constants).
-	StartBudget  time.Duration // wait for the capture file to appear after launch
-	FinalizeWait time.Duration // wait for the size to stabilize after SIGINT
+	StartBudget       time.Duration // wait for the capture file to appear after launch
+	FinalizeWait      time.Duration // wait for the size to stabilize after SIGINT
+	DeviceReadyBudget time.Duration // max wait for the device to attach to adb before the launch retries give up
+}
+
+// deviceReadyBudget resolves the device-online pre-flight wait (default
+// screenrecordDeviceReadyBudget — an emulator pod's live phase can start while
+// the Android system is still booting).
+func (cfg RecorderConfig) deviceReadyBudget() time.Duration {
+	if cfg.DeviceReadyBudget > 0 {
+		return cfg.DeviceReadyBudget
+	}
+	return screenrecordDeviceReadyBudget
 }
 
 // startBudget resolves the start gate's wait (default screenrecordStartBudget).
@@ -133,27 +146,92 @@ func (cfg RecorderConfig) artifactPath() string {
 	return filepath.Join(cfg.StateDir, cfg.SessionID+".mp4")
 }
 
+// screenrecordRetryInterval paces the device-ready launch retries: an emulator
+// pod's live phase can begin while the Android system is still booting (the
+// device not yet attached to the adb server, and its display/media not yet
+// ready even once the shell answers), so the first launch attempt legitimately
+// fails — the retry loop rides out the boot instead of failing the whole
+// session on a transient DeviceNotFound or a screenrecord that cannot produce
+// yet.
+const deviceReadyRetryInterval = time.Second
+
+// displayReady reports whether the device's display is up — screenrecord's
+// hard prerequisite. The adb shell can answer while the emulator's display/media
+// still boots (sys.boot_completed is not enough): a screenrecord launched before
+// the display is ON produces no capture file and silently exits, so the launch
+// gate holds for the display state marker the emulator prints once the surface
+// is up (verified live: "mState=ON" appears in dumpsys display the moment the
+// UI comes up). The offline/not-yet case degrades to a false — the bounded
+// device-ready loop rides it out inside the budget.
+func displayReady(dev sessionDevice) bool {
+	out, err := dev.RunCommand("sh", "-c", "dumpsys display 2>/dev/null | grep mState=ON")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "mState=ON")
+}
+
 // startScreenrecord launches the device-side recorder detached and waits for the
 // capture file to appear (a launch that fails — no screenrecord, a missing
 // display — fails the START, before the phase burns a whole bracket on a
-// recorder that never captured).
-func startScreenrecord(dev sessionDevice, cfg RecorderConfig) error {
+// recorder that never captured). The launch is retried within a bounded
+// DEVICE-READY budget (RecorderConfig.DeviceReadyBudget, default
+// screenrecordDeviceReadyBudget): a fresh emulator pod accepts the adb shell
+// while its display/media still boots, so a launch accepted before the display
+// is up produces no capture file — the per-shot file gate + relaunch rides
+// that out too, and the display-ready pre-flight (displayReady) holds the
+// first launch until the display is ON. done closes at phase stop, so an
+// abort mid-wait is a clean early finalize, never a hung recorder.
+func startScreenrecord(dev sessionDevice, cfg RecorderConfig, done <-chan struct{}) error {
 	remote := cfg.remotePath()
-	// The standard adb background idiom: nohup + fds redirected, so the adb
-	// shell returns the moment the launch line is accepted. --time-limit is the
-	// safety cap, NOT the stop (the phase-driven SIGINT bracket ends it).
-	cmd := fmt.Sprintf("nohup screenrecord --time-limit %d %s >/dev/null 2>&1 &", screenrecordMaxSeconds, remote)
-	if _, err := dev.RunCommand("sh", "-c", cmd); err != nil {
-		return fmt.Errorf("screenrecord start: %w", err)
-	}
-	deadline := time.Now().Add(cfg.startBudget())
-	for time.Now().Before(deadline) {
-		if _, err := dev.Stat(remote); err == nil {
-			return nil
+	deadline := time.Now().Add(cfg.deviceReadyBudget())
+	for {
+		select {
+		case <-done:
+			return fmt.Errorf("screenrecord start: device not ready within the phase (session aborted)")
+		default:
 		}
-		time.Sleep(250 * time.Millisecond)
+		// Display/media gate: hold the launch until the emulator's display is up
+		// (the screenrecord prerequisite — see displayReady). A launch accepted
+		// while the UI still boots burns the per-shot budget on a screenrecord
+		// that cannot produce; a pre-launch wait is the honest gate.
+		if !displayReady(dev) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("screenrecord start: device display never became ready inside %s (still booting?); last probe found the display off", cfg.deviceReadyBudget())
+			}
+			time.Sleep(deviceReadyRetryInterval)
+			continue
+		}
+		// The standard adb background idiom: nohup + fds redirected, so the adb
+		// shell returns the moment the launch line is accepted. --time-limit is the
+		// safety cap, NOT the stop (the phase-driven SIGINT bracket ends it).
+		cmd := fmt.Sprintf("nohup screenrecord --time-limit %d %s >/dev/null 2>&1 &", screenrecordMaxSeconds, remote)
+		launched := false
+		if _, err := dev.RunCommand("sh", "-c", cmd); err == nil {
+			launched = true
+			// Launch accepted: the capture file must appear within the per-shot
+			// start budget, else the device accepted the shell but screenrecord
+			// cannot produce yet (booting display/media) — that shot is retried.
+			shot := time.Now().Add(cfg.startBudget())
+			for time.Now().Before(shot) {
+				if _, err := dev.Stat(remote); err == nil {
+					return nil
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+		// Either the device wasn't attached (launch failed on the adb wire) or the
+		// launch was accepted but no capture file appeared. Both ride out within
+		// the device-ready budget; the budget-exhausted error names the honest
+		// cause (a never-accepted launch vs. a launch that never produced).
+		if time.Now().After(deadline) {
+			if launched {
+				return fmt.Errorf("screenrecord start: %s did not appear within %s (screenrecord launch failed on device?)", remote, cfg.deviceReadyBudget())
+			}
+			return fmt.Errorf("screenrecord start: device never became ready inside %s (still booting?); last launch failed on the adb wire", cfg.deviceReadyBudget())
+		}
+		time.Sleep(deviceReadyRetryInterval)
 	}
-	return fmt.Errorf("screenrecord start: %s did not appear within %s (screenrecord launch failed on device?)", remote, cfg.startBudget())
 }
 
 // stopScreenrecord SIGINTs the device recorder and waits for the MP4 to finalize:
@@ -260,12 +338,32 @@ func RunSessionRecorder(cfg RecorderConfig, done <-chan struct{}) (int64, error)
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		return 0, fmt.Errorf("recorder: create state dir: %w", err)
 	}
-	dev, err := adbDeviceForAddr(cfg.Addr, cfg.Serial)
-	if err != nil {
-		_ = finalizeSession(cfg, "", 0)
-		return 0, fmt.Errorf("recorder: dial device %s: %w", cfg.Addr, err)
+	// Dial the device signal-aware: the runner's stop (SIGTERM → done) can arrive
+	// WHILE the dial is still blocking on the adb wire (a fresh emulator pod's
+	// published adb port may not answer for seconds). A dial raced by done must
+	// finalize the artifact-less evidence row instead of dying to the runner's
+	// TERM→KILL grace — the adb-session-stop gate polls that row.
+	type dialResult struct {
+		dev sessionDevice
+		err error
 	}
-	return runSessionCapture(dev, cfg, done)
+	dialCh := make(chan dialResult, 1)
+	go func() {
+		dev, err := adbDeviceForAddr(cfg.Addr, cfg.Serial)
+		dialCh <- dialResult{dev: dev, err: err}
+	}()
+	select {
+	case <-done:
+		_ = finalizeSession(cfg, "", 0)
+		return 0, fmt.Errorf("recorder: session aborted before the device dial completed")
+	case dr := <-dialCh:
+		if dr.err != nil {
+			_ = finalizeSession(cfg, "", 0)
+			return 0, fmt.Errorf("recorder: dial device %s: %w", cfg.Addr, dr.err)
+		}
+		dev := dr.dev
+		return runSessionCapture(dev, cfg, done)
+	}
 }
 
 // runSessionCapture is the bracket engine over an injected device handle — the
@@ -276,11 +374,20 @@ func RunSessionRecorder(cfg RecorderConfig, done <-chan struct{}) (int64, error)
 // finalizes the row (with the artifact only if the pull produced one) and is
 // returned — the provider's stop surfaces the honest outcome.
 func runSessionCapture(dev sessionDevice, cfg RecorderConfig, done <-chan struct{}) (int64, error) {
-	if err := startScreenrecord(dev, cfg); err != nil {
+	if err := startScreenrecord(dev, cfg, done); err != nil {
 		_ = finalizeSession(cfg, "", 0)
 		return 0, err
 	}
 	<-done
+	// R1 (the adb-session-stop row gate, runs 2026.250.1940/2017/2027): the
+	// runner's stop is SIGTERM → ProcessShutdownGrace → SIGKILL, and the device
+	// finalize chain (SIGINT → size-stabilize → goadb pull) can exceed it — the
+	// recorder was SIGKILLed mid-pull, losing the row. The evidence row is
+	// finalized FIRST (artifact-less; the absent artifact is the visible
+	// failure), so a stop raced by SIGKILL can never lose it — the stop gate
+	// polls exactly that row — and a completed pull REWRITES the row with the
+	// mp4 artifact.
+	_ = finalizeSession(cfg, "", 0)
 	size, stopErr := stopScreenrecord(dev, cfg)
 	mp4 := cfg.artifactPath()
 	var pullErr error

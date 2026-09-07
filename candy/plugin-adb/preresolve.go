@@ -38,10 +38,17 @@ const (
 // androidPreresolveParams decodes the host's marshalDeployOpParams envelope (name/dir/node/plans —
 // the SAME ad-hoc shape every OpPreresolve dispatch already carries, unchanged by this move).
 type androidPreresolveParams struct {
-	Name  string                   `json:"name"`
-	Dir   string                   `json:"dir"`
-	Node  *spec.Deploy             `json:"node"`
-	Plans []*deploykit.InstallPlan `json:"plans"`
+	Name string       `json:"name"`
+	Dir  string       `json:"dir"`
+	Node *spec.Deploy `json:"node"`
+	// Plans arrive in the JSON-roundtrippable WIRE form (spec.InstallPlanView —
+	// the same shape build_overlay.go / unified_targets.go serialize for every
+	// substrate); the old *deploykit.InstallPlan decode (Steps []spec.InstallStep
+	// interface) cannot unmarshal the wire objects:
+	//   json: cannot unmarshal object into androidPreresolveParams.plans.0.steps.0
+	//   of type spec.InstallStep
+	// collectAndroidInstalls re-materializes the concrete steps via spec.PlanFromView.
+	Plans []*spec.InstallPlanView `json:"plans"`
 }
 
 // invokeAndroidPreresolve serves Invoke(OpPreresolve) for deploy:android.
@@ -184,10 +191,8 @@ func resolveAndroidDevice(spc *spec.ResolvedAndroid, node *spec.Deploy, path, em
 	if node != nil && node.Engine == "docker" {
 		engine = "docker"
 	}
-	var container string
-	if i := strings.LastIndexByte(path, '.'); i >= 0 {
-		parent := path[:i]
-		container = "charly-" + kit.NestedContainerName(parent)
+	container := androidParentContainer(node, path)
+	if container != "" {
 		engine = kit.EngineBinary(engine)
 		if !kit.ContainerRunning(engine, container) {
 			return androidDevice{}, fmt.Errorf("parent pod container %s is not running (start it before deploying the android device)", container)
@@ -223,16 +228,23 @@ func resolveAndroidHostPortRef(addr, path string, node *spec.Deploy) (string, er
 	if _, err := fmt.Sscanf(before0, "%d", &ctrPort); err != nil || ctrPort <= 0 {
 		return "", fmt.Errorf("adb host %q: ${HOST_PORT:N} requires a positive container port", addr)
 	}
-	i := strings.LastIndexByte(path, '.')
-	if i < 0 {
-		return "", fmt.Errorf("adb host %q uses ${HOST_PORT:%d} but the device is not nested under a pod (deploy path %q has no parent to read the published port from)", addr, ctrPort, path)
+	// Parent pod derivation is shared with the in-pod device path (R3 — one
+	// canonical derivation, androidParentContainer): the loader stamps
+	// Deploy.MemberOf with the folded parent's registered key, so a nested
+	// endpoint device (device-net under check-android-emulator-pod) resolves
+	// the pod container here; the dotted-path parse is the fallback for
+	// un-stamped callers. The old inline parse only understood dotted paths,
+	// so a MemberOf-stamped member key with no dots ("device-net") wrongly
+	// reported the endpoint as "not nested under a pod" even though it is.
+	container := androidParentContainer(node, path)
+	if container == "" {
+		return "", fmt.Errorf("adb host %q uses ${HOST_PORT:%d} but the device is not nested under a pod (deploy %q has no parent pod container to read the published port from)", addr, ctrPort, path)
 	}
 	engine := "podman"
 	if node != nil && node.Engine == "docker" {
 		engine = "docker"
 	}
 	engine = kit.EngineBinary(engine)
-	container := "charly-" + kit.NestedContainerName(path[:i])
 	if !kit.ContainerRunning(engine, container) {
 		return "", fmt.Errorf("parent pod container %s is not running (start it before deploying the android endpoint device)", container)
 	}
@@ -247,13 +259,38 @@ func resolveAndroidHostPortRef(addr, path string, node *spec.Deploy) (string, er
 	return before + fmt.Sprintf("%d", hp) + after0, nil
 }
 
-// collectAndroidInstalls walks the deploy's compiled plans for ApkInstallStep entries and flattens
-// them into the wire install list, rewriting committed-APK relative paths to ABSOLUTE host paths.
-func collectAndroidInstalls(plans []*deploykit.InstallPlan) ([]spec.ApkPackageSpec, error) {
+// androidParentContainer derives the parent pod container a NESTED android device
+// targets, or "" for a standalone device. The deploy tree stamps Deploy.MemberOf
+// with the folded parent's registered key (loader-derived; the bed's nested
+// device: / device-net: nodes under check-android-emulator-pod carry
+// MemberOf="check-android-emulator-pod"), which survives the leaf-name preresolve
+// path (device — the dotted-path parse is the fallback for un-stamped
+// callers). NestedContainerName maps dots to underscores (spec's venue naming).
+func androidParentContainer(node *spec.Deploy, path string) string {
+	if node != nil && node.MemberOf != "" {
+		return "charly-" + kit.NestedContainerName(node.MemberOf)
+	}
+	if i := strings.LastIndexByte(path, '.'); i >= 0 {
+		return "charly-" + kit.NestedContainerName(path[:i])
+	}
+	return ""
+}
+
+// collectAndroidInstalls walks the deploy's compiled plans (WIRE VIEWS — the
+// InstallPlanView form the host serializes) for ApkInstallStep entries and flattens
+// them into the wire install list, rewriting committed-APK relative paths to ABSOLUTE
+// host paths. Each view is re-materialized through spec.PlanFromView so the concrete
+// *spec.ApkInstallStep assertion below sees the rich in-core step (InstallStepView
+// is the JSON form; spec.InstallStep the interface — the two do not round-trip).
+func collectAndroidInstalls(plans []*spec.InstallPlanView) ([]spec.ApkPackageSpec, error) {
 	var installs []spec.ApkPackageSpec
-	for _, p := range plans {
-		if p == nil {
+	for _, pv := range plans {
+		if pv == nil {
 			continue
+		}
+		p, err := spec.PlanFromView(*pv)
+		if err != nil {
+			return nil, err
 		}
 		for _, step := range p.Steps {
 			apkStep, ok := step.(*spec.ApkInstallStep)
