@@ -27,6 +27,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	adb "github.com/zach-klippenstein/goadb"
@@ -61,7 +62,7 @@ const (
 	screenrecordFinalizeWait      = 10 * time.Second       // wait for the size to stabilize after SIGINT
 	screenrecordStabilityGap      = 750 * time.Millisecond // two equal Stat samples = finalized
 	screenrecordRemoteDir         = "/sdcard"
-	screenrecordDeviceReadyBudget = 90 * time.Second // max wait for the emulator to attach to adb at phase start
+	screenrecordDeviceReadyBudget = 90 * time.Second // max wait for the emulator to attach to adb + its display to come up at phase start
 )
 
 // evidenceRow mirrors the shared #EvidenceRow shape (plan §4 A-task-1) — the
@@ -154,16 +155,33 @@ func (cfg RecorderConfig) artifactPath() string {
 // yet.
 const deviceReadyRetryInterval = time.Second
 
+// displayReady reports whether the device's display is up — screenrecord's
+// hard prerequisite. The adb shell can answer while the emulator's display/media
+// still boots (sys.boot_completed is not enough): a screenrecord launched before
+// the display is ON produces no capture file and silently exits, so the launch
+// gate holds for the display state marker the emulator prints once the surface
+// is up (verified live: "mState=ON" appears in dumpsys display the moment the
+// UI comes up). The offline/not-yet case degrades to a false — the bounded
+// device-ready loop rides it out inside the budget.
+func displayReady(dev sessionDevice) bool {
+	out, err := dev.RunCommand("sh", "-c", "dumpsys display 2>/dev/null | grep mState=ON")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "mState=ON")
+}
+
 // startScreenrecord launches the device-side recorder detached and waits for the
 // capture file to appear (a launch that fails — no screenrecord, a missing
 // display — fails the START, before the phase burns a whole bracket on a
 // recorder that never captured). The launch is retried within a bounded
 // DEVICE-READY budget (RecorderConfig.DeviceReadyBudget, default
 // screenrecordDeviceReadyBudget): a fresh emulator pod accepts the adb shell
-// while its display/media still boots, so the file gate gets its own short
-// per-shot budget and a shot that produced nothing is retried, not failed
-// hard. done closes at phase stop, so an abort mid-wait is a clean early
-// finalize, never a hung recorder.
+// while its display/media still boots, so a launch accepted before the display
+// is up produces no capture file — the per-shot file gate + relaunch rides
+// that out too, and the display-ready pre-flight (displayReady) holds the
+// first launch until the display is ON. done closes at phase stop, so an
+// abort mid-wait is a clean early finalize, never a hung recorder.
 func startScreenrecord(dev sessionDevice, cfg RecorderConfig, done <-chan struct{}) error {
 	remote := cfg.remotePath()
 	deadline := time.Now().Add(cfg.deviceReadyBudget())
@@ -172,6 +190,17 @@ func startScreenrecord(dev sessionDevice, cfg RecorderConfig, done <-chan struct
 		case <-done:
 			return fmt.Errorf("screenrecord start: device not ready within the phase (session aborted)")
 		default:
+		}
+		// Display/media gate: hold the launch until the emulator's display is up
+		// (the screenrecord prerequisite — see displayReady). A launch accepted
+		// while the UI still boots burns the per-shot budget on a screenrecord
+		// that cannot produce; a pre-launch wait is the honest gate.
+		if !displayReady(dev) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("screenrecord start: device display never became ready inside %s (still booting?); last probe found the display off", cfg.deviceReadyBudget())
+			}
+			time.Sleep(deviceReadyRetryInterval)
+			continue
 		}
 		// The standard adb background idiom: nohup + fds redirected, so the adb
 		// shell returns the moment the launch line is accepted. --time-limit is the

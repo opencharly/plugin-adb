@@ -39,6 +39,12 @@ type fakeDevice struct {
 	sizeIdx     int
 	remoteBytes string // the canned "device file" OpenRead streams
 	offlineRuns int    // the first N RunCommands fail like a device not attached to adb yet
+	// displayOffRuns + displayOff script the DISPLAY-ready probe (the E-4
+	// display/media gate): displayOffRuns is the number of ONLINE probe rounds
+	// that still report the display off (the emulator shell answered but the
+	// surface is still booting); displayOff makes the display NEVER come up.
+	displayOffRuns int
+	displayOff     bool
 }
 
 func (f *fakeDevice) RunCommand(cmd string, args ...string) (string, error) {
@@ -49,7 +55,14 @@ func (f *fakeDevice) RunCommand(cmd string, args ...string) (string, error) {
 		f.offlineRuns--
 		return "", fmt.Errorf("DeviceNotFound: device not attached to the adb server yet")
 	}
-	return "", nil
+	if f.displayOffRuns > 0 {
+		f.displayOffRuns--
+		return "", nil // shell answered, display still booting
+	}
+	if f.displayOff {
+		return "", nil // display never comes up (budget-exhaustion case)
+	}
+	return "mState=ON", nil // the display-ready marker dumpsys display prints
 }
 
 func (f *fakeDevice) Stat(path string) (*adb.DirEntry, error) {
@@ -76,16 +89,17 @@ func (f *fakeDevice) callsJoined() string {
 	return strings.Join(f.calls, " | ")
 }
 
-// TestStartScreenrecordInvocation pins the EXACT device launch contract: one
-// "sh -c" line that backgrounds screenrecord with the safety time-limit and the
-// session's on-device path, with all fds redirected so the adb shell returns.
+// TestStartScreenrecordInvocation pins the EXACT device launch contract: the
+// display-ready probe ("dumpsys display" marker gate) then ONE "sh -c" line that
+// backgrounds screenrecord with the safety time-limit and the session's on-device
+// path, with all fds redirected so the adb shell returns.
 func TestStartScreenrecordInvocation(t *testing.T) {
 	fake := &fakeDevice{remoteSizes: []int32{0, 128, 128}}
 	cfg := RecorderConfig{SessionID: "bed.member.cap", StateDir: "/x"}
 	if err := startScreenrecord(fake, cfg, nil); err != nil {
 		t.Fatalf("startScreenrecord: %v", err)
 	}
-	want := "sh -c nohup screenrecord --time-limit 1800 /sdcard/bed.member.cap.mp4 >/dev/null 2>&1 &"
+	want := "sh -c dumpsys display 2>/dev/null | grep mState=ON | sh -c nohup screenrecord --time-limit 1800 /sdcard/bed.member.cap.mp4 >/dev/null 2>&1 &"
 	if got := fake.callsJoined(); got != want {
 		t.Errorf("invocation = %q, want %q", got, want)
 	}
@@ -93,6 +107,44 @@ func TestStartScreenrecordInvocation(t *testing.T) {
 	fake2 := &fakeDevice{remoteSizes: []int32{1}}
 	if err := startScreenrecord(fake2, RecorderConfig{SessionID: "s"}, nil); err != nil {
 		t.Fatalf("startScreenrecord (first sample present): %v", err)
+	}
+}
+
+// TestStartScreenrecordWaitsForDisplay proves the E-4 display/media gate: the
+// emulator's adb shell can answer while the display still boots, so the launch
+// is held until the dumpsys probe sees the display ON — a screenrecord launched
+// before the display is up produces no capture file and burns the budget on a
+// dead recorder. Mirrors the live 2026.250.1905 failure (screenrecord "did not
+// appear within 1m30s" — the 1905 emulator accepted the shell for 90s while the
+// display was still booting).
+func TestStartScreenrecordWaitsForDisplay(t *testing.T) {
+	fake := &fakeDevice{offlineRuns: 1, displayOffRuns: 2, remoteSizes: []int32{0}}
+	if err := startScreenrecord(fake, RecorderConfig{SessionID: "s", DeviceReadyBudget: 30 * time.Second}, nil); err != nil {
+		t.Fatalf("startScreenrecord with a booting display: %v", err)
+	}
+	got := fake.callsJoined()
+	if n := strings.Count(got, "dumpsys display"); n != 4 {
+		t.Errorf("display probes = %d, want 4 (1 offline + 2 display-off + 1 on)", n)
+	}
+	if n := strings.Count(got, "screenrecord --time-limit"); n != 1 {
+		t.Errorf("launch attempts = %d, want 1 (the display gate held the launch until ON)", n)
+	}
+	probe := strings.Index(got, "dumpsys")
+	launch := strings.Index(got, "screenrecord")
+	if probe == -1 || launch == -1 || probe > launch {
+		t.Errorf("launch preceded the last display probe — the gate did not hold: %q", got)
+	}
+}
+
+// TestStartScreenrecordDisplayNeverReady proves the display gate's honest
+// budget failure: a device whose display never comes up fails the START with the
+// display-named error instead of burning the phase on a recorder that can never
+// capture.
+func TestStartScreenrecordDisplayNeverReady(t *testing.T) {
+	fake := &fakeDevice{displayOff: true, remoteSizes: nil}
+	err := startScreenrecord(fake, RecorderConfig{SessionID: "s", DeviceReadyBudget: 120 * time.Millisecond}, nil)
+	if err == nil || !strings.Contains(err.Error(), "display never became ready") {
+		t.Fatalf("startScreenrecord with the display never up: want display-budget error, got %v", err)
 	}
 }
 
@@ -424,8 +476,12 @@ func TestStartScreenrecordRetriesWhileDeviceOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startScreenrecord with a booting device: %v", err)
 	}
-	if got := fake.callsJoined(); strings.Count(got, "screenrecord --time-limit") != 4 {
-		t.Errorf("launch retries = %q, want 4 launch attempts (3 offline + 1 accepted)", got)
+	got := fake.callsJoined()
+	if n := strings.Count(got, "dumpsys display"); n != 4 {
+		t.Errorf("display probes = %d, want 4 (3 offline round-trips + 1 accepted)", n)
+	}
+	if n := strings.Count(got, "screenrecord --time-limit"); n != 1 {
+		t.Errorf("launch attempts = %d, want 1 (the display gate holds the launch until the device attaches)", n)
 	}
 }
 
