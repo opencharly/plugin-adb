@@ -41,7 +41,14 @@ type androidPreresolveParams struct {
 	Name  string                   `json:"name"`
 	Dir   string                   `json:"dir"`
 	Node  *spec.Deploy             `json:"node"`
-	Plans []*deploykit.InstallPlan `json:"plans"`
+	// Plans arrive in the JSON-roundtrippable WIRE form (spec.InstallPlanView —
+	// the same shape build_overlay.go / unified_targets.go serialize for every
+	// substrate); the old *deploykit.InstallPlan decode (Steps []spec.InstallStep
+	// interface) cannot unmarshal the wire objects:
+	//   json: cannot unmarshal object into androidPreresolveParams.plans.0.steps.0
+	//   of type spec.InstallStep
+	// collectAndroidInstalls re-materializes the concrete steps via spec.PlanFromView.
+	Plans []*spec.InstallPlanView `json:"plans"`
 }
 
 // invokeAndroidPreresolve serves Invoke(OpPreresolve) for deploy:android.
@@ -247,13 +254,21 @@ func resolveAndroidHostPortRef(addr, path string, node *spec.Deploy) (string, er
 	return before + fmt.Sprintf("%d", hp) + after0, nil
 }
 
-// collectAndroidInstalls walks the deploy's compiled plans for ApkInstallStep entries and flattens
-// them into the wire install list, rewriting committed-APK relative paths to ABSOLUTE host paths.
-func collectAndroidInstalls(plans []*deploykit.InstallPlan) ([]spec.ApkPackageSpec, error) {
+// collectAndroidInstalls walks the deploy's compiled plans (WIRE VIEWS — the
+// InstallPlanView form the host serializes) for ApkInstallStep entries and flattens
+// them into the wire install list, rewriting committed-APK relative paths to ABSOLUTE
+// host paths. Each view is re-materialized through spec.PlanFromView so the concrete
+// *spec.ApkInstallStep assertion below sees the rich in-core step (InstallStepView
+// is the JSON form; spec.InstallStep the interface — the two do not round-trip).
+func collectAndroidInstalls(plans []*spec.InstallPlanView) ([]spec.ApkPackageSpec, error) {
 	var installs []spec.ApkPackageSpec
-	for _, p := range plans {
-		if p == nil {
+	for _, pv := range plans {
+		if pv == nil {
 			continue
+		}
+		p, err := spec.PlanFromView(*pv)
+		if err != nil {
+			return nil, err
 		}
 		for _, step := range p.Steps {
 			apkStep, ok := step.(*spec.ApkInstallStep)
