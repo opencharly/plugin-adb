@@ -30,6 +30,9 @@ type adbEnv struct {
 	Instance      string `json:"instance"`
 	Mode          string `json:"mode"` // "live" | "box"
 	ContainerName string `json:"container_name"`
+	// Venue is the shared CheckEnv snapshot's venue id (session evidence-row
+	// provenance; absent for the deploy/status seams).
+	Venue string `json:"venue"`
 
 	// deploy/status extras (absent for the check verb).
 	AdbAddr     string `json:"adb_addr"`

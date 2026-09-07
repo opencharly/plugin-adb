@@ -48,4 +48,30 @@ type AdbInput struct {
 	ArtifactNotUniform bool `yaml:"artifact_not_uniform,omitempty" json:"artifact_not_uniform,omitempty"`
 
 	ArtifactMinCastEvents int `yaml:"artifact_min_cast_events,omitempty" json:"artifact_min_cast_events,omitempty"`
+
+	// session + session lifecycle — the ON-DEVICE screenrecord bracket (plan
+	// Cutover E, E-4): `adb: session` runs the plugin's OWN binary in recorder mode
+	// through the runner's generic background-session service (plugin-check's
+	// verb:session seam). start launches the device-side `screenrecord` detached
+	// (nohup screenrecord --time-limit 1800 /sdcard/<session_id>.mp4 &), stop
+	// SIGINTs it (pkill -INT) and pulls the finalized MP4 via the goadb
+	// device-file GetFile path (OpenRead — the same sync wire the committed-APK
+	// push uses) into state_dir/<session_id>.mp4, then finalizes with the FINAL
+	// marker + the evidence row.json (the shared #EvidenceRow shape). The provider
+	// holds no device wire for a session — the detached recorder does.
+	Action string `yaml:"action,omitempty" json:"action,omitempty"`
+
+	SessionId string `yaml:"session_id,omitempty" json:"session_id,omitempty"`
+
+	StateDir string `yaml:"state_dir,omitempty" json:"state_dir,omitempty"`
+
+	// artifact_dir — the runner-injected generic evidence-artifact dir (verb-agnostic;
+	// the provider appends its own filename/extension).
+	ArtifactDir string `yaml:"artifact_dir,omitempty" json:"artifact_dir,omitempty"`
+
+	LogDir string `yaml:"log_dir,omitempty" json:"log_dir,omitempty"`
+
+	Venue string `yaml:"venue,omitempty" json:"venue,omitempty"`
+
+	Phase string `yaml:"phase,omitempty" json:"phase,omitempty"`
 }

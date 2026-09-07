@@ -32,7 +32,7 @@
 #AdbInput: {
 	// method — the adb method name (the former core #AdbMethod enum; the verb's
 	// PRIMARY input field, so `adb: devices` desugars to {method: "devices"}).
-	method: ("devices" | "shell" | "install" | "install-app" | "uninstall" | "getprop" | "screencap" | "logcat-tail" | "wait-for-device" | "wait-ui-settled" | "current-focus" | "keyevent") @go(Method,type=string)
+	method: ("devices" | "shell" | "install" | "install-app" | "uninstall" | "getprop" | "screencap" | "logcat-tail" | "wait-for-device" | "wait-ui-settled" | "current-focus" | "keyevent" | "session") @go(Method,type=string)
 	// arg — the shell argv (shell: arg[0] program + arg[1:] args) / the package id
 	// (uninstall: arg[0]).
 	arg?: [...string] @go(Args)
@@ -58,4 +58,24 @@
 	artifact_min_dimensions?:  string & =~"^[0-9]+x[0-9]+$" @go(ArtifactMinDimensions)
 	artifact_not_uniform?:     bool                         @go(ArtifactNotUniform)
 	artifact_min_cast_events?: int & >=0                    @go(ArtifactMinCastEvents,type=int)
+
+	// session + session lifecycle — the ON-DEVICE screenrecord bracket (plan
+	// Cutover E, E-4): `adb: session` runs the plugin's OWN binary in recorder mode
+	// through the runner's generic background-session service (plugin-check's
+	// verb:session seam). start launches the device-side `screenrecord` detached
+	// (nohup screenrecord --time-limit 1800 /sdcard/<session_id>.mp4 &), stop
+	// SIGINTs it (pkill -INT) and pulls the finalized MP4 via the goadb
+	// device-file GetFile path (OpenRead — the same sync wire the committed-APK
+	// push uses) into state_dir/<session_id>.mp4, then finalizes with the FINAL
+	// marker + the evidence row.json (the shared #EvidenceRow shape). The provider
+	// holds no device wire for a session — the detached recorder does.
+	action?:      "start" | "stop" | "status" @go(Action)
+	session_id?: string @go(SessionId)
+	state_dir?:  string @go(StateDir)
+	// artifact_dir — the runner-injected generic evidence-artifact dir (verb-agnostic;
+	// the provider appends its own filename/extension).
+	artifact_dir?: string @go(ArtifactDir)
+	log_dir?:   string @go(LogDir)
+	venue?:     string @go(Venue)
+	phase?:     string @go(Phase)
 }
