@@ -38,12 +38,17 @@ type fakeDevice struct {
 	remoteSizes []int32 // scripted Stat sizes for the session remote path (-1 = not yet created)
 	sizeIdx     int
 	remoteBytes string // the canned "device file" OpenRead streams
+	offlineRuns int    // the first N RunCommands fail like a device not attached to adb yet
 }
 
 func (f *fakeDevice) RunCommand(cmd string, args ...string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, strings.Join(append([]string{cmd}, args...), " "))
+	if f.offlineRuns > 0 {
+		f.offlineRuns--
+		return "", fmt.Errorf("DeviceNotFound: device not attached to the adb server yet")
+	}
 	return "", nil
 }
 
@@ -77,7 +82,7 @@ func (f *fakeDevice) callsJoined() string {
 func TestStartScreenrecordInvocation(t *testing.T) {
 	fake := &fakeDevice{remoteSizes: []int32{0, 128, 128}}
 	cfg := RecorderConfig{SessionID: "bed.member.cap", StateDir: "/x"}
-	if err := startScreenrecord(fake, cfg); err != nil {
+	if err := startScreenrecord(fake, cfg, nil); err != nil {
 		t.Fatalf("startScreenrecord: %v", err)
 	}
 	want := "sh -c nohup screenrecord --time-limit 1800 /sdcard/bed.member.cap.mp4 >/dev/null 2>&1 &"
@@ -86,7 +91,7 @@ func TestStartScreenrecordInvocation(t *testing.T) {
 	}
 	// a nonzero size on the FIRST sample: the launch already succeeded.
 	fake2 := &fakeDevice{remoteSizes: []int32{1}}
-	if err := startScreenrecord(fake2, RecorderConfig{SessionID: "s"}); err != nil {
+	if err := startScreenrecord(fake2, RecorderConfig{SessionID: "s"}, nil); err != nil {
 		t.Fatalf("startScreenrecord (first sample present): %v", err)
 	}
 }
@@ -96,7 +101,7 @@ func TestStartScreenrecordInvocation(t *testing.T) {
 // a whole phase burns on a dead recorder).
 func TestStartScreenrecordTimesOutWithoutTheFile(t *testing.T) {
 	fake := &fakeDevice{remoteSizes: nil} // Stat never finds the file
-	if err := startScreenrecord(fake, RecorderConfig{SessionID: "s", StartBudget: 120 * time.Millisecond}); err == nil ||
+	if err := startScreenrecord(fake, RecorderConfig{SessionID: "s", StartBudget: 120 * time.Millisecond, DeviceReadyBudget: 150 * time.Millisecond}, nil); err == nil ||
 		!strings.Contains(err.Error(), "did not appear") {
 		t.Fatalf("startScreenrecord with no capture file: want timeout error, got %v", err)
 	}
@@ -402,5 +407,44 @@ func TestFinalizeSessionWritesMarkerAndRow(t *testing.T) {
 	}
 	if want := "final bytes=4096\n"; string(marker) != want {
 		t.Errorf("FINAL content = %q, want %q", marker, want)
+	}
+}
+
+// TestStartScreenrecordRetriesWhileDeviceOffline proves the E-4 device-ready
+// pre-flight: the live phase of an emulator pod can begin while the Android
+// system is still booting (the device not yet attached to the adb server), so
+// the first launch attempt legitimately fails with DeviceNotFound. The launch
+// retries inside the device-ready budget; once the device is online the launch
+// is accepted and the existing file-gate runs. This is what lets the
+// check-android-emulator-pod adb session survive a cold emulator boot at
+// check-live start.
+func TestStartScreenrecordRetriesWhileDeviceOffline(t *testing.T) {
+	fake := &fakeDevice{offlineRuns: 3, remoteSizes: []int32{0}}
+	err := startScreenrecord(fake, RecorderConfig{SessionID: "s", DeviceReadyBudget: 5 * time.Second}, nil)
+	if err != nil {
+		t.Fatalf("startScreenrecord with a booting device: %v", err)
+	}
+	if got := fake.callsJoined(); strings.Count(got, "screenrecord --time-limit") != 4 {
+		t.Errorf("launch retries = %q, want 4 launch attempts (3 offline + 1 accepted)", got)
+	}
+}
+
+// TestStartScreenrecordAbortsOnDone proves a phase-end close during the
+// device-ready wait is a clean early finalize, never a hung recorder: the
+// runner's stop (SIGTERM) closes done while the recorder still waits for the
+// device, and startScreenrecord returns promptly with the abort error (the
+// caller finalizes the artifact-less evidence row, which is what the
+// adb-session-stop gate polls).
+func TestStartScreenrecordAbortsOnDone(t *testing.T) {
+	fake := &fakeDevice{offlineRuns: 1000, remoteSizes: nil} // never becomes ready
+	done := make(chan struct{})
+	close(done)
+	start := time.Now()
+	err := startScreenrecord(fake, RecorderConfig{SessionID: "s", DeviceReadyBudget: 30 * time.Second}, done)
+	if err == nil || !strings.Contains(err.Error(), "aborted") {
+		t.Fatalf("startScreenrecord with done closed: want abort error, got %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("abort took %v, want a prompt return", time.Since(start))
 	}
 }

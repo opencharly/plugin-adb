@@ -56,11 +56,12 @@ const (
 // guards a forgotten stop (screenrecord's default limit is 180s — too short for
 // a real phase).
 const (
-	screenrecordMaxSeconds   = 1800
-	screenrecordStartBudget  = 5 * time.Second // wait for the capture file to appear after launch
-	screenrecordFinalizeWait = 10 * time.Second
-	screenrecordStabilityGap = 750 * time.Millisecond // two equal Stat samples = finalized
-	screenrecordRemoteDir    = "/sdcard"
+	screenrecordMaxSeconds        = 1800
+	screenrecordStartBudget       = 5 * time.Second        // wait for the capture file to appear after launch
+	screenrecordFinalizeWait      = 10 * time.Second       // wait for the size to stabilize after SIGINT
+	screenrecordStabilityGap      = 750 * time.Millisecond // two equal Stat samples = finalized
+	screenrecordRemoteDir         = "/sdcard"
+	screenrecordDeviceReadyBudget = 90 * time.Second // max wait for the emulator to attach to adb at phase start
 )
 
 // evidenceRow mirrors the shared #EvidenceRow shape (plan §4 A-task-1) — the
@@ -103,8 +104,19 @@ type RecorderConfig struct {
 	Phase     string // evidence-row provenance (build|live|update|teardown)
 
 	// Bounded-wait budgets (test-overridable; zero = the package constants).
-	StartBudget  time.Duration // wait for the capture file to appear after launch
-	FinalizeWait time.Duration // wait for the size to stabilize after SIGINT
+	StartBudget       time.Duration // wait for the capture file to appear after launch
+	FinalizeWait      time.Duration // wait for the size to stabilize after SIGINT
+	DeviceReadyBudget time.Duration // max wait for the device to attach to adb before the launch retries give up
+}
+
+// deviceReadyBudget resolves the device-online pre-flight wait (default
+// screenrecordDeviceReadyBudget — an emulator pod's live phase can start while
+// the Android system is still booting).
+func (cfg RecorderConfig) deviceReadyBudget() time.Duration {
+	if cfg.DeviceReadyBudget > 0 {
+		return cfg.DeviceReadyBudget
+	}
+	return screenrecordDeviceReadyBudget
 }
 
 // startBudget resolves the start gate's wait (default screenrecordStartBudget).
@@ -133,27 +145,64 @@ func (cfg RecorderConfig) artifactPath() string {
 	return filepath.Join(cfg.StateDir, cfg.SessionID+".mp4")
 }
 
+// screenrecordRetryInterval paces the device-ready launch retries: an emulator
+// pod's live phase can begin while the Android system is still booting (the
+// device not yet attached to the adb server, and its display/media not yet
+// ready even once the shell answers), so the first launch attempt legitimately
+// fails — the retry loop rides out the boot instead of failing the whole
+// session on a transient DeviceNotFound or a screenrecord that cannot produce
+// yet.
+const deviceReadyRetryInterval = time.Second
+
 // startScreenrecord launches the device-side recorder detached and waits for the
 // capture file to appear (a launch that fails — no screenrecord, a missing
 // display — fails the START, before the phase burns a whole bracket on a
-// recorder that never captured).
-func startScreenrecord(dev sessionDevice, cfg RecorderConfig) error {
+// recorder that never captured). The launch is retried within a bounded
+// DEVICE-READY budget (RecorderConfig.DeviceReadyBudget, default
+// screenrecordDeviceReadyBudget): a fresh emulator pod accepts the adb shell
+// while its display/media still boots, so the file gate gets its own short
+// per-shot budget and a shot that produced nothing is retried, not failed
+// hard. done closes at phase stop, so an abort mid-wait is a clean early
+// finalize, never a hung recorder.
+func startScreenrecord(dev sessionDevice, cfg RecorderConfig, done <-chan struct{}) error {
 	remote := cfg.remotePath()
-	// The standard adb background idiom: nohup + fds redirected, so the adb
-	// shell returns the moment the launch line is accepted. --time-limit is the
-	// safety cap, NOT the stop (the phase-driven SIGINT bracket ends it).
-	cmd := fmt.Sprintf("nohup screenrecord --time-limit %d %s >/dev/null 2>&1 &", screenrecordMaxSeconds, remote)
-	if _, err := dev.RunCommand("sh", "-c", cmd); err != nil {
-		return fmt.Errorf("screenrecord start: %w", err)
-	}
-	deadline := time.Now().Add(cfg.startBudget())
-	for time.Now().Before(deadline) {
-		if _, err := dev.Stat(remote); err == nil {
-			return nil
+	deadline := time.Now().Add(cfg.deviceReadyBudget())
+	for {
+		select {
+		case <-done:
+			return fmt.Errorf("screenrecord start: device not ready within the phase (session aborted)")
+		default:
 		}
-		time.Sleep(250 * time.Millisecond)
+		// The standard adb background idiom: nohup + fds redirected, so the adb
+		// shell returns the moment the launch line is accepted. --time-limit is the
+		// safety cap, NOT the stop (the phase-driven SIGINT bracket ends it).
+		cmd := fmt.Sprintf("nohup screenrecord --time-limit %d %s >/dev/null 2>&1 &", screenrecordMaxSeconds, remote)
+		launched := false
+		if _, err := dev.RunCommand("sh", "-c", cmd); err == nil {
+			launched = true
+			// Launch accepted: the capture file must appear within the per-shot
+			// start budget, else the device accepted the shell but screenrecord
+			// cannot produce yet (booting display/media) — that shot is retried.
+			shot := time.Now().Add(cfg.startBudget())
+			for time.Now().Before(shot) {
+				if _, err := dev.Stat(remote); err == nil {
+					return nil
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
+		// Either the device wasn't attached (launch failed on the adb wire) or the
+		// launch was accepted but no capture file appeared. Both ride out within
+		// the device-ready budget; the budget-exhausted error names the honest
+		// cause (a never-accepted launch vs. a launch that never produced).
+		if time.Now().After(deadline) {
+			if launched {
+				return fmt.Errorf("screenrecord start: %s did not appear within %s (screenrecord launch failed on device?)", remote, cfg.deviceReadyBudget())
+			}
+			return fmt.Errorf("screenrecord start: device never became ready inside %s (still booting?); last launch failed on the adb wire", cfg.deviceReadyBudget())
+		}
+		time.Sleep(deviceReadyRetryInterval)
 	}
-	return fmt.Errorf("screenrecord start: %s did not appear within %s (screenrecord launch failed on device?)", remote, cfg.startBudget())
 }
 
 // stopScreenrecord SIGINTs the device recorder and waits for the MP4 to finalize:
@@ -276,7 +325,7 @@ func RunSessionRecorder(cfg RecorderConfig, done <-chan struct{}) (int64, error)
 // finalizes the row (with the artifact only if the pull produced one) and is
 // returned — the provider's stop surfaces the honest outcome.
 func runSessionCapture(dev sessionDevice, cfg RecorderConfig, done <-chan struct{}) (int64, error) {
-	if err := startScreenrecord(dev, cfg); err != nil {
+	if err := startScreenrecord(dev, cfg, done); err != nil {
 		_ = finalizeSession(cfg, "", 0)
 		return 0, err
 	}
