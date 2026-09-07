@@ -309,12 +309,32 @@ func RunSessionRecorder(cfg RecorderConfig, done <-chan struct{}) (int64, error)
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		return 0, fmt.Errorf("recorder: create state dir: %w", err)
 	}
-	dev, err := adbDeviceForAddr(cfg.Addr, cfg.Serial)
-	if err != nil {
-		_ = finalizeSession(cfg, "", 0)
-		return 0, fmt.Errorf("recorder: dial device %s: %w", cfg.Addr, err)
+	// Dial the device signal-aware: the runner's stop (SIGTERM → done) can arrive
+	// WHILE the dial is still blocking on the adb wire (a fresh emulator pod's
+	// published adb port may not answer for seconds). A dial raced by done must
+	// finalize the artifact-less evidence row instead of dying to the runner's
+	// TERM→KILL grace — the adb-session-stop gate polls that row.
+	type dialResult struct {
+		dev sessionDevice
+		err error
 	}
-	return runSessionCapture(dev, cfg, done)
+	dialCh := make(chan dialResult, 1)
+	go func() {
+		dev, err := adbDeviceForAddr(cfg.Addr, cfg.Serial)
+		dialCh <- dialResult{dev: dev, err: err}
+	}()
+	select {
+	case <-done:
+		_ = finalizeSession(cfg, "", 0)
+		return 0, fmt.Errorf("recorder: session aborted before the device dial completed")
+	case dr := <-dialCh:
+		if dr.err != nil {
+			_ = finalizeSession(cfg, "", 0)
+			return 0, fmt.Errorf("recorder: dial device %s: %w", cfg.Addr, dr.err)
+		}
+		dev := dr.dev
+		return runSessionCapture(dev, cfg, done)
+	}
 }
 
 // runSessionCapture is the bracket engine over an injected device handle — the
