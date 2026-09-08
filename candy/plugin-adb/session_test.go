@@ -246,7 +246,17 @@ func TestRunSessionCaptureEndToEnd(t *testing.T) {
 		n, err := runSessionCapture(fake, cfg, done)
 		rc <- res{n, err}
 	}()
-	time.Sleep(30 * time.Millisecond)
+	// Wait DETERMINISTICALLY for the start bracket to be underway (the fake's
+	// screenrecord launch appears in the invocation log) before closing done as
+	// the SIGTERM analog — a fixed-sleep race here flakes under CI load (a
+	// starved goroutine finalizes at 0 bytes when done closes pre-start).
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(fake.callsJoined(), "nohup screenrecord") {
+		if time.Now().After(deadline) {
+			t.Fatalf("start bracket never launched (screenrecord not invoked)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	close(done)
 	got := <-rc
 	if got.err != nil {
