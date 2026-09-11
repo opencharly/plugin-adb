@@ -1,0 +1,38 @@
+# R10 verification assets for the G-8 change (the screencap -> sdk.LandArtifact tail).
+#
+# Run as an ISOLATED live invocation against the disposable pod bed whose emulator
+# is adb-attached (bed definition: pod: {image: android-emulator, disposable: true},
+# plan add_candy: ['@github.com/opencharly/plugin-adb/candy/plugin-adb'] -- VERSIONLESS
+# so the runner builds the provider from the checkout named by CHARLY_REPO_OVERRIDE):
+#
+#   CHARLY_REPO_OVERRIDE=github.com/opencharly/plugin-adb=<this checkout> \
+#     charly check live <bed> --steps-file candy/plugin-adb/testdata/g8-live/screencap-live-steps.yml
+#
+# ASSERTION: the exit code. 0 == the changed tail ran live host-side, wrote the real
+# emulator PNG, and sdk.RunArtifactValidators accepted it (artifact_min_bytes +
+# artifact_min_dimensions).
+- check: the emulator is attached to the adb server the bed publishes
+  id: g8-devices-online
+  adb: devices
+  stdout:
+    - contains: emulator-5554
+  context:
+    - runtime
+- check: adb:screencap runs the changed LandArtifact tail host-side - the live emulator PNG passes artifact_min_bytes and the validators
+  id: g8-screencap-passes
+  adb:
+    method: screencap
+    artifact: /tmp/g8-land-spike.png
+    artifact_min_bytes: 1024
+    artifact_min_dimensions: 1x1
+  stdout:
+    - contains: wrote
+  context:
+    - runtime
+- check: the landed PNG exists host-side (the LandArtifact tail validated it)
+  id: g8-landed-file-present
+  command:
+    command: 'test -s /tmp/g8-land-spike.png'
+    in_container: false
+  context:
+    - runtime
