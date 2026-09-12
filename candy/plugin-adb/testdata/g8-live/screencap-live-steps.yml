@@ -8,8 +8,8 @@
 # sugar form is SILENTLY DROPPED (a step ends up with no verb set) or ABORTS the whole decode. The
 # desugar lives only in the loader (sdk/loaderkit/parse.go), and plugin-check's own CHANGELOG
 # records its omission on this path as deliberate for ENGINE-INJECTED steps. A user-authored steps
-# file must therefore use the wire form until that lever accepts the sugar too (tracked as its own
-# finding).
+# file must therefore use the wire form until that lever accepts the sugar too. That finding is the
+# NAMED batch G-6a (owner: plugin-check + the plan-docs owner) in README.md's *Named batches*.
 #
 # ASSERTION: the exit code IS the assertion — 0 = every step ran and passed.
 - check: the emulator is attached to the adb server the bed publishes
