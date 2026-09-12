@@ -1,0 +1,45 @@
+# G-8 live verification — the POSITIVE direction of the changed sdk.LandArtifact tail.
+#
+# AUTHORING FORM — read before editing. These steps are written in the WIRE form
+# (`plugin:` + `plugin_input:` + explicit `op:`/`value:` matchers), NOT in the `<word>: <input>`
+# authoring sugar. Reason, proven live on 2026-09-12: `charly check live <bed> --steps-file <file>`
+# parses the file with a raw yaml.Unmarshal into []spec.Step (plugin-check/candy/plugin-check/
+# live_cmd.go), and spec.Op carries no per-verb fields, no catch-all and no UnmarshalYAML — so the
+# sugar form is SILENTLY DROPPED (a step ends up with no verb set) or ABORTS the whole decode. The
+# desugar lives only in the loader (sdk/loaderkit/parse.go), and plugin-check's own CHANGELOG
+# records its omission on this path as deliberate for ENGINE-INJECTED steps. A user-authored steps
+# file must therefore use the wire form until that lever accepts the sugar too. That finding is the
+# NAMED batch G-6a (owner: plugin-check + the plan-docs owner) in README.md's *Named batches*.
+#
+# ASSERTION: the exit code IS the assertion — 0 = every step ran and passed.
+- check: the emulator is attached to the adb server the bed publishes
+  id: g8-devices-online
+  plugin: adb
+  plugin_input:
+    method: devices
+  context:
+    - runtime
+  stdout:
+    - op: contains
+      value: emulator-5554
+- check: adb:screencap runs the changed LandArtifact tail host-side - the live emulator PNG passes artifact_min_bytes and the validators
+  id: g8-screencap-passes
+  plugin: adb
+  plugin_input:
+    method: screencap
+    artifact: /tmp/g8-land-spike.png
+    artifact_min_bytes: 1024
+    artifact_min_dimensions: 1x1
+  context:
+    - runtime
+  stdout:
+    - op: contains
+      value: wrote
+- check: the landed PNG exists host-side (the LandArtifact tail validated it)
+  id: g8-landed-file-present
+  plugin: command
+  plugin_input:
+    command: test -s /tmp/g8-land-spike.png
+    in_container: false
+  context:
+    - runtime

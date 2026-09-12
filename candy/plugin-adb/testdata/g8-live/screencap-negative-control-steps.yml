@@ -1,0 +1,18 @@
+# G-8 live verification — the NEGATIVE control for the changed sdk.LandArtifact tail.
+#
+# AUTHORING FORM: wire form, for the same proven reason as screencap-live-steps.yml (see the
+# header there) — on the --steps-file path the `<word>: <input>` sugar loses the verb.
+#
+# ASSERTION: the exit code IS the assertion — 2 = the check RAN and failed as required, and the
+# report must name `required min 4000x4000`. An exit 2 WITHOUT that message is a FALSE PASS
+# (the step never dispatched), which is exactly the failure the sugar form produced here: it
+# exited 2 while proving nothing.
+- check: negative control - an impossible artifact minimum must be REJECTED through the changed LandArtifact tail
+  id: g8-neg-screencap
+  plugin: adb
+  plugin_input:
+    method: screencap
+    artifact: /tmp/g8-land-spike-fail.png
+    artifact_min_dimensions: 4000x4000
+  context:
+    - runtime

@@ -8,6 +8,7 @@ import (
 	"github.com/opencharly/plugin-adb/candy/plugin-adb/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/spec/ops"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -93,7 +94,33 @@ func (provider) invokeVerb(ctx context.Context, req *pb.InvokeRequest) (*pb.Invo
 
 	out, runErr := dispatch(&env, &op)
 
-	// The shared exit/stdout/stderr + screencap-artifact verdict pipeline (R3). screencap is
-	// adb's one artifact-producing method.
-	return sdk.VerbVerdict("adb", method, out, runErr, &op, method == "screencap")
+	// The shared exit/stdout/stderr MATCHERS-only verdict pipeline (R3) — the
+	// artifact validators left the verdict at the G-8 cutover: the screencap
+	// artifact tail runs below through the shared sdk.LandArtifact entry point
+	// (the write-then-validate call every capture plugin uses).
+	reply, verr := sdk.VerbVerdict("adb", method, out, runErr, &op, false)
+	if verr != nil {
+		return nil, verr
+	}
+	// Gate the artifact tail on a PASS verdict — a matcher mismatch returns
+	// before any artifact work. The {status,message} wire is decoded through the
+	// CONTRACT module's shared decoder, ops.ParseResultJSON, which lives beside the
+	// ops.ResultJSON encoder this pipeline replies with — so the shape is declared
+	// once, in its owning package, and never re-declared here (R3). A malformed or
+	// absent payload is a non-pass gate exactly as before.
+	if status, _, derr := ops.ParseResultJSON(reply); derr != nil || status != "pass" {
+		return reply, nil
+	}
+	// screencap is adb's one artifact-producing method. The PNG is written
+	// HOST-side (the provider runs on the host via LocalTransport and dials the
+	// device itself; the base64 PNG comes back over the goadb exec wire), so this
+	// is the HOST leg of sdk.LandArtifact: nothing pulled, nothing written; the
+	// shared artifact validators (artifact_min_bytes etc.) ALWAYS run on the
+	// existing host artifact path via sdk.RunArtifactValidators.
+	if method == "screencap" {
+		if err := sdk.LandArtifact(ctx, nil, "", in.Artifact, &op); err != nil {
+			return sdk.ResultJSON("fail", fmt.Sprintf("adb: screencap: %v", err))
+		}
+	}
+	return reply, nil
 }
