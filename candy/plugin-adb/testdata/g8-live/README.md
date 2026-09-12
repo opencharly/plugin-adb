@@ -21,6 +21,28 @@ pastes its own `charly version` beside its own exit code.
 | `screencap-live-steps.yml` | the changed tail runs host-side against a booted emulator and its validators ACCEPT the real PNG | `charly check live` exits 0 |
 | `screencap-negative-control-steps.yml` | the SAME tail REJECTS an impossible `artifact_min_dimensions` | `charly check live` exits 2 and the report names `required min 4000x4000` |
 
+## Authoring form (read this before editing these files)
+
+These step files are written in the **WIRE form** — `plugin:` + `plugin_input:` + explicit
+`op:`/`value:` matchers — and NOT in the `<word>: <input>` authoring sugar.
+
+**Why, proven live on 2026-09-12:** `charly check live <bed> --steps-file <file>` parses the
+file with a raw `yaml.Unmarshal` into `[]spec.Step`
+(`plugin-check/candy/plugin-check/live_cmd.go:39-47`), and `spec.Op` carries no per-verb
+fields, no catch-all and no `UnmarshalYAML`. The sugar is therefore **silently dropped** —
+the step then reports `check has no verb set` and exits 2 while proving **nothing** — or it
+aborts the whole decode (`command:` is a map, `spec.Op.Command` is a Go string). The desugar
+exists only in the loader (`sdk/loaderkit/parse.go`), and plugin-check's CHANGELOG records
+its omission on this path as deliberate for **engine-injected** steps.
+
+`--steps-file` is however a **user-facing** lever, and the authoring sugar is what the plan
+docs teach — so this divergence is tracked as its own finding. Until that lever accepts the
+sugar, a hand-authored steps file **must** use the wire form above.
+
+The assertion mechanism is unchanged and is the reason these files exist: the **exit code is
+the assertion** (`0` = ran and passed; `2` = ran and failed as required, with the failure
+message naming the reason).
+
 ## Target
 
 A disposable pod bed composing the `android-emulator` image:

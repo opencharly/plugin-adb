@@ -1,20 +1,16 @@
-# Negative control for the SAME G-8 change: the changed sdk.LandArtifact tail must
-# REJECT an impossible artifact_min_dimensions on the real emulator PNG.
+# G-8 live verification — the NEGATIVE control for the changed sdk.LandArtifact tail.
 #
-# Run as an isolated live invocation, same target and env as screencap-live-steps.yml:
+# AUTHORING FORM: wire form, for the same proven reason as screencap-live-steps.yml (see the
+# header there) — on the --steps-file path the `<word>: <input>` sugar loses the verb.
 #
-#   CHARLY_REPO_OVERRIDE=github.com/opencharly/plugin-adb=<this checkout> \
-#     charly check live <bed> --steps-file candy/plugin-adb/testdata/g8-live/screencap-negative-control-steps.yml
-#   echo "exit=$?"   # 2 == the check RAN and FAILED, naming the validator
-#
-# ASSERTION: the exit code (2) plus the validator message in the report. Deliberately
-# NO exit_status expectation on the adb step: sdk.VerbVerdict consumes op.ExitStatus
-# INSIDE the plugin against the DISPATCH exit, so an exit_status expectation makes the
-# step fail "exit=0, want 1" BEFORE the LandArtifact tail ever runs (observed live in
-# run 2026.254.2045). The isolated invocation is what asserts the rejection.
+# ASSERTION: the exit code IS the assertion — 2 = the check RAN and failed as required, and the
+# report must name `required min 4000x4000`. An exit 2 WITHOUT that message is a FALSE PASS
+# (the step never dispatched), which is exactly the failure the sugar form produced here: it
+# exited 2 while proving nothing.
 - check: negative control - an impossible artifact minimum must be REJECTED through the changed LandArtifact tail
   id: g8-neg-screencap
-  adb:
+  plugin: adb
+  plugin_input:
     method: screencap
     artifact: /tmp/g8-land-spike-fail.png
     artifact_min_dimensions: 4000x4000

@@ -1,38 +1,45 @@
-# R10 verification assets for the G-8 change (the screencap -> sdk.LandArtifact tail).
+# G-8 live verification — the POSITIVE direction of the changed sdk.LandArtifact tail.
 #
-# Run as an ISOLATED live invocation against the disposable pod bed whose emulator
-# is adb-attached (bed definition: pod: {image: android-emulator, disposable: true},
-# plan add_candy: ['@github.com/opencharly/plugin-adb/candy/plugin-adb'] -- VERSIONLESS
-# so the runner builds the provider from the checkout named by CHARLY_REPO_OVERRIDE):
+# AUTHORING FORM — read before editing. These steps are written in the WIRE form
+# (`plugin:` + `plugin_input:` + explicit `op:`/`value:` matchers), NOT in the `<word>: <input>`
+# authoring sugar. Reason, proven live on 2026-09-12: `charly check live <bed> --steps-file <file>`
+# parses the file with a raw yaml.Unmarshal into []spec.Step (plugin-check/candy/plugin-check/
+# live_cmd.go), and spec.Op carries no per-verb fields, no catch-all and no UnmarshalYAML — so the
+# sugar form is SILENTLY DROPPED (a step ends up with no verb set) or ABORTS the whole decode. The
+# desugar lives only in the loader (sdk/loaderkit/parse.go), and plugin-check's own CHANGELOG
+# records its omission on this path as deliberate for ENGINE-INJECTED steps. A user-authored steps
+# file must therefore use the wire form until that lever accepts the sugar too (tracked as its own
+# finding).
 #
-#   CHARLY_REPO_OVERRIDE=github.com/opencharly/plugin-adb=<this checkout> \
-#     charly check live <bed> --steps-file candy/plugin-adb/testdata/g8-live/screencap-live-steps.yml
-#
-# ASSERTION: the exit code. 0 == the changed tail ran live host-side, wrote the real
-# emulator PNG, and sdk.RunArtifactValidators accepted it (artifact_min_bytes +
-# artifact_min_dimensions).
+# ASSERTION: the exit code IS the assertion — 0 = every step ran and passed.
 - check: the emulator is attached to the adb server the bed publishes
   id: g8-devices-online
-  adb: devices
-  stdout:
-    - contains: emulator-5554
+  plugin: adb
+  plugin_input:
+    method: devices
   context:
     - runtime
+  stdout:
+    - op: contains
+      value: emulator-5554
 - check: adb:screencap runs the changed LandArtifact tail host-side - the live emulator PNG passes artifact_min_bytes and the validators
   id: g8-screencap-passes
-  adb:
+  plugin: adb
+  plugin_input:
     method: screencap
     artifact: /tmp/g8-land-spike.png
     artifact_min_bytes: 1024
     artifact_min_dimensions: 1x1
-  stdout:
-    - contains: wrote
   context:
     - runtime
+  stdout:
+    - op: contains
+      value: wrote
 - check: the landed PNG exists host-side (the LandArtifact tail validated it)
   id: g8-landed-file-present
-  command:
-    command: 'test -s /tmp/g8-land-spike.png'
+  plugin: command
+  plugin_input:
+    command: test -s /tmp/g8-land-spike.png
     in_container: false
   context:
     - runtime
