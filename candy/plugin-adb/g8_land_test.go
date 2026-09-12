@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/opencharly/sdk"
+	"github.com/opencharly/spec/ops"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -45,7 +45,15 @@ func newStubListener(t *testing.T, st *stubState) net.Listener {
 // env ships the stub address as the resolved device's adb server).
 func invokeVerbAgainstStub(t *testing.T, ln net.Listener, input map[string]any) (*pb.InvokeReply, error) {
 	t.Helper()
-	op := &spec.Op{PluginInput: input}
+	return invokeVerbOpAgainstStub(t, ln, &spec.Op{PluginInput: input})
+}
+
+// invokeVerbOpAgainstStub is invokeVerbAgainstStub for a test that must ALSO pin
+// top-level step fields: the stdout/stderr matcher lists and exit_status live on the
+// step's Op, BESIDE plugin_input, exactly as the authored wire places them — not
+// inside the plugin input map.
+func invokeVerbOpAgainstStub(t *testing.T, ln net.Listener, op *spec.Op) (*pb.InvokeReply, error) {
+	t.Helper()
 	paramsJSON, err := json.Marshal(op)
 	if err != nil {
 		t.Fatal(err)
@@ -58,18 +66,17 @@ func invokeVerbAgainstStub(t *testing.T, ln net.Listener, input map[string]any) 
 	return (provider{}).invokeVerb(context.Background(), req)
 }
 
-// decodeWire decodes the {status,message} InvokeReply wire the changed replyStatus
-// gate reads, failing the test on an undecodable payload.
+// decodeWire decodes the {status,message} InvokeReply wire through the CONTRACT
+// module's shared decoder — ops.ParseResultJSON, the counterpart of the encoder
+// the verdict pipeline replies with — so these tests never re-declare the shape
+// the plugin itself stopped re-declaring (R3).
 func decodeWire(t *testing.T, reply *pb.InvokeReply) (status, message string) {
 	t.Helper()
-	var w struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(reply.GetResultJson(), &w); err != nil {
+	status, message, err := ops.ParseResultJSON(reply)
+	if err != nil {
 		t.Fatalf("decode reply wire %q: %v", string(reply.GetResultJson()), err)
 	}
-	return w.Status, w.Message
+	return status, message
 }
 
 // TestInvokeVerbScreencapLandArtifactTail is the changed-path execution over the
@@ -142,25 +149,36 @@ func TestInvokeVerbNonScreencapSkipsArtifactTail(t *testing.T) {
 	}
 }
 
-// TestReplyStatusWireDecode covers the replyStatus gate's decode contract: nil,
-// empty, and non-JSON payloads decode to zero values (no panic), and the real
-// ResultJSON wire round-trips status+message.
-func TestReplyStatusWireDecode(t *testing.T) {
-	if s, _ := replyStatus(nil); s != "" {
-		t.Fatalf("nil reply status = %q, want empty", s)
+// TestInvokeVerbNonPassVerdictSkipsArtifactTail pins the verdict GATE itself: when
+// the shared matcher pipeline already returns a NON-pass verdict, invokeVerb
+// returns THAT wire before any artifact work. The step carries an artifact minimum
+// the stub PNG cannot satisfy, so the two possible outcomes are distinguishable in
+// the message — the stdout mismatch means the tail never ran, while the tail's own
+// "required min" error means it did. Dropping the gate (running the tail
+// unconditionally) fails this test on the 4000x4000 error.
+func TestInvokeVerbNonPassVerdictSkipsArtifactTail(t *testing.T) {
+	st := &stubState{shellOut: tinyPNGBase64, shellMu: make(chan int, 1)}
+	ln := newStubListener(t, st)
+
+	reply, err := invokeVerbOpAgainstStub(t, ln, &spec.Op{
+		PluginInput: map[string]any{
+			"method":                  "screencap",
+			"artifact":                filepath.Join(t.TempDir(), "gated.png"),
+			"artifact_min_dimensions": "4000x4000",
+		},
+		Stdout: spec.MatcherList{{Op: "contains", Value: "NEVER-APPEARS-IN-THE-SCREENCAP-OUTPUT"}},
+	})
+	if err != nil {
+		t.Fatalf("invokeVerb(screencap): %v", err)
 	}
-	if s, _ := replyStatus(&pb.InvokeReply{}); s != "" {
-		t.Fatalf("empty payload status = %q, want empty", s)
+	status, msg := decodeWire(t, reply)
+	if status != "fail" {
+		t.Fatalf("matcher verdict = %q (%q), want fail", status, msg)
 	}
-	if s, _ := replyStatus(&pb.InvokeReply{ResultJson: []byte("not-json")}); s != "" {
-		t.Fatalf("garbage payload status = %q, want empty", s)
+	if !strings.Contains(msg, "stdout:") {
+		t.Fatalf("wire message %q is not the stdout matcher failure", msg)
 	}
-	reply, _ := sdk.ResultJSON("pass", "wrote 67 bytes to /tmp/screencap.png")
-	if s, m := replyStatus(reply); s != "pass" || m != "wrote 67 bytes to /tmp/screencap.png" {
-		t.Fatalf("wire round-trip = (%q, %q), want (pass, wrote 67 bytes ...)", s, m)
-	}
-	replyFail, _ := sdk.ResultJSON("fail", "adb: screencap: artifact size 67 < required min_bytes 1024")
-	if s, m := replyStatus(replyFail); s != "fail" || !strings.Contains(m, "adb: screencap:") {
-		t.Fatalf("fail wire round-trip = (%q, %q)", s, m)
+	if strings.Contains(msg, "4000x4000") {
+		t.Fatalf("the artifact tail ran despite a non-pass verdict: %q", msg)
 	}
 }

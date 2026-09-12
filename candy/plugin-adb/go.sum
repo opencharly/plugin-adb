@@ -68,6 +68,8 @@ github.com/opencharly/sdk v0.2026254.439 h1:9DnSzQ2LBPoNNw6arfKQKBRN4AYYagSYYOiS
 github.com/opencharly/sdk v0.2026254.439/go.mod h1:bHkz9iCZVrpRQ1GjmsqnnOZYkk6bidLqzmikJivJbrU=
 github.com/opencharly/spec v0.2026250.2036 h1:szPuKqRRzkGQcoM4NbSS7oJ6iHd3790EODsPzb0RASY=
 github.com/opencharly/spec v0.2026250.2036/go.mod h1:yaB8ABSTiJClK1xq/zCtWizcqfKKOhnuKcgGrHwxmW8=
+github.com/opencharly/spec v0.2026255.1250 h1:wlUDDcN3Dl40TVwcPpKOaDSv2w4OQ0TcoQ4VYYPk35Y=
+github.com/opencharly/spec v0.2026255.1250/go.mod h1:yaB8ABSTiJClK1xq/zCtWizcqfKKOhnuKcgGrHwxmW8=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=

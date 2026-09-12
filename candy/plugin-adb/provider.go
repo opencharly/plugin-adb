@@ -8,6 +8,7 @@ import (
 	"github.com/opencharly/plugin-adb/candy/plugin-adb/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/spec/ops"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -102,8 +103,12 @@ func (provider) invokeVerb(ctx context.Context, req *pb.InvokeRequest) (*pb.Invo
 		return nil, verr
 	}
 	// Gate the artifact tail on a PASS verdict — a matcher mismatch returns
-	// before any artifact work.
-	if status, _ := replyStatus(reply); status != "pass" {
+	// before any artifact work. The {status,message} wire is decoded through the
+	// CONTRACT module's shared decoder, ops.ParseResultJSON, which lives beside the
+	// ops.ResultJSON encoder this pipeline replies with — so the shape is declared
+	// once, in its owning package, and never re-declared here (R3). A malformed or
+	// absent payload is a non-pass gate exactly as before.
+	if status, _, derr := ops.ParseResultJSON(reply); derr != nil || status != "pass" {
 		return reply, nil
 	}
 	// screencap is adb's one artifact-producing method. The PNG is written
@@ -118,22 +123,4 @@ func (provider) invokeVerb(ctx context.Context, req *pb.InvokeRequest) (*pb.Invo
 		}
 	}
 	return reply, nil
-}
-
-// replyStatus decodes the {status,message} wire every out-of-process check verb
-// returns (ResultJSON > InvokeReply.ResultJson; the host's pluginCheckResult
-// reads the same shape). The provider uses it to gate the artifact tail on the
-// shared verdict pipeline's outcome without duplicating the wire contract.
-func replyStatus(reply *pb.InvokeReply) (status, message string) {
-	if reply == nil || len(reply.GetResultJson()) == 0 {
-		return "", ""
-	}
-	var w struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(reply.GetResultJson(), &w); err != nil {
-		return "", ""
-	}
-	return w.Status, w.Message
 }
