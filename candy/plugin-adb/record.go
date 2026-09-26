@@ -212,21 +212,8 @@ func startScreenrecord(dev sessionDevice, cfg RecorderConfig, done <-chan struct
 			// Launch accepted: the capture file must appear within the per-shot
 			// start budget, else the device accepted the shell but screenrecord
 			// cannot produce yet (booting display/media) — that shot is retried.
-			// done is observed here too (not only at the outer loop head): the
-			// runner's stop is SIGTERM → ProcessShutdownGrace (2s) → SIGKILL, so a
-			// phase that ends while this per-shot wait is still running used to
-			// take the SIGKILL before runSessionCapture could finalize — losing the
-			// evidence row the stop gate polls. Returning a start error on abort
-			// makes runSessionCapture finalize the row immediately (R1 2026-09-25,
-			// the adb-session-stop row gate: start→stop at t+2s deterministically
-			// lost the row before this check).
 			shot := time.Now().Add(cfg.startBudget())
 			for time.Now().Before(shot) {
-				select {
-				case <-done:
-					return fmt.Errorf("screenrecord start: session aborted while waiting for the capture file")
-				default:
-				}
 				if _, err := dev.Stat(remote); err == nil {
 					return nil
 				}
