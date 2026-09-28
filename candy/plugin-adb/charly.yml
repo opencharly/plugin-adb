@@ -1,7 +1,5 @@
-version: 2026.232.0520
 plugin-adb:
     candy:
-        version: 2026.180.0001
         description: |-
             OUT-OF-TREE charly plugin owning ALL Android device interaction: the `adb`
             Android-Debug-Bridge check VERB, the `deploy:android` SUBSTRATE (the
