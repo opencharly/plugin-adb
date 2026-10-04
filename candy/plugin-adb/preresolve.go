@@ -101,7 +101,7 @@ func invokeAndroidPreresolve(ctx context.Context, req *pb.InvokeRequest) (*pb.In
 	// (InvokeProvider) — no longer threaded through the "deploy-entity-resolve" seam.
 	email, token := resolveGoogleCreds(ctx, exec, spc.GoogleAccount)
 
-	dev, err := resolveAndroidDevice(&spc, node, p.Name, email, token)
+	dev, err := resolveAndroidDevice(ctx, &spc, node, p.Name, email, token)
 	if err != nil {
 		return nil, fmt.Errorf("deploy %q: resolving android device %q: %w", p.Name, node.From, err)
 	}
@@ -167,7 +167,7 @@ func adbAddrForContainer(engine, containerName string) (string, error) {
 
 // resolveAndroidDevice builds the androidDevice install handle from the spec and deploy context.
 // email/token arrive already resolved by the caller (resolveGoogleCreds, via verb:credential).
-func resolveAndroidDevice(spc *spec.ResolvedAndroid, node *spec.Deploy, path, email, token string) (androidDevice, error) {
+func resolveAndroidDevice(ctx context.Context, spc *spec.ResolvedAndroid, node *spec.Deploy, path, email, token string) (androidDevice, error) {
 	serial := spc.EffectiveSerial()
 
 	if spc.IsEndpoint() {
@@ -198,7 +198,7 @@ func resolveAndroidDevice(spc *spec.ResolvedAndroid, node *spec.Deploy, path, em
 			return androidDevice{}, fmt.Errorf("parent pod container %s is not running (start it before deploying the android device)", container)
 		}
 	} else {
-		eng, name, err := deploykit.ResolveContainer(spc.Box, "")
+		eng, name, err := deploykit.ResolveContainer(ctx, spc.Box, "")
 		if err != nil {
 			return androidDevice{}, err
 		}
