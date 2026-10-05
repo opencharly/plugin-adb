@@ -29,7 +29,7 @@ import (
 //     SUCCEEDING is the readiness condition) — reusing the SAME install/install-app
 //     method handlers the `adb:` verb dispatches (dispatch(), methods.go);
 //   - return the uninstall teardown ops the host records in the ledger and replays at
-//     `charly fleet del` (record-and-replay, the external deploy lifecycle).
+//     `charly deploy del` (record-and-replay, the external deploy lifecycle).
 //
 // The plugin runs as a HOST subprocess (LocalTransport), so it reads the committed-APK
 // host paths directly and reaches the adb endpoint (network / `engine exec`) directly —
@@ -140,7 +140,7 @@ func installWithRetry(deadline, interval time.Duration, op func() (string, error
 // androidUninstallReverseOp builds the best-effort teardown op for one installed
 // package: a host shell script that `pm uninstall`s it via the venue's adb (the baked
 // in-pod adb under `engine exec`, or host `adb -H -P` for a remote endpoint). `|| true`
-// keeps it idempotent — at `charly fleet del` the emulator pod may already be gone
+// keeps it idempotent — at `charly deploy del` the emulator pod may already be gone
 // (its lifecycle belongs to the pod deploy). System scope (uninstall mutates
 // device-global package state); the host records + replays it (record-and-replay).
 func androidUninstallReverseOp(env *adbEnv, pkg string) spec.ReverseOp {
