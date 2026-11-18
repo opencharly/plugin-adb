@@ -1,0 +1,55 @@
+# The Go gates for this plugin's own module (R7: tests that can fail).
+#
+# WHY THIS FILE EXISTS. `candy/plugin-adb/params_repro_test.go` gates the committed
+# `params/cue_types_gen.go` against the canonical generator, but a test that nothing runs
+# is a gate that cannot fail. Measured before this file landed: 120 plugin repos carried
+# `tag-on-merge.yml`, 7 carried a `ci.yml`, and the org-required validator is a thin caller
+# of `pr-validator.yml` (review + check-run gate) — it never runs a repo's `go test`. So
+# this module's reproducibility gate had no venue until this workflow existed.
+#
+# The steps are the same four gates the contract module runs (gofmt, vet, build, test), in
+# that order: formatting and compilation failures are reported before test output, and a
+# test result means nothing before the build is green.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candy/plugin-adb/go.mod
+          cache-dependency-path: candy/plugin-adb/go.sum
+
+      - name: gofmt
+        working-directory: candy/plugin-adb
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        working-directory: candy/plugin-adb
+        run: GOWORK=off go vet ./...
+
+      - name: build
+        working-directory: candy/plugin-adb
+        run: GOWORK=off go build ./...
+
+      # No device is attached on a CI runner; the suite's device-dependent tests skip
+      # visibly (t.Skip) and the params reproducibility gate runs for real.
+      - name: tests
+        working-directory: candy/plugin-adb
+        run: GOWORK=off go test ./...
